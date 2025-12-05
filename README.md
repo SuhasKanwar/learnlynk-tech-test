@@ -165,3 +165,69 @@ Write **8–12 lines** describing how you would implement a Stripe Checkout flow
 3. Share the link.
 
 Good luck.
+
+---
+
+## Implementation Status
+
+### Section 1 - Database Schema (`backend/schema.sql`)
+- Created 3 tables: leads, applications, tasks
+- All tables include: id, tenant_id, created_at, updated_at
+- applications.lead_id → FK to leads(id) with cascade delete
+- tasks.application_id → FK to applications(id) with cascade delete
+- Check constraint: tasks.type IN ('call', 'email', 'review')
+- Check constraint: tasks.due_at >= created_at
+- Indexes for leads: tenant_id, owner_id, stage, created_at, compound indexes
+- Indexes for applications: tenant_id, lead_id, stage, compound indexes
+- Indexes for tasks: tenant_id, due_at, status, compound indexes
+
+### Section 2 - RLS Policies (`backend/rls_policies.sql`)
+- Supporting tables created: users, teams, user_teams
+- RLS enabled on leads table
+- Helper functions for JWT claims (user_id, role, tenant_id)
+- SELECT policy: Counselors see leads they own OR leads in their team, Admins see all
+- INSERT policy: Counselors and admins can insert leads for their tenant
+
+### Section 3 - Edge Function (`backend/edge-functions/create-task/index.ts`)
+- POST endpoint accepting application_id, task_type, due_at
+- Validates task_type is one of: call, email, review
+- Validates due_at is valid ISO 8601 format
+- Validates due_at is in the future
+- Verifies application exists
+- Inserts task into tasks table using Supabase client with service role
+- Emits Realtime broadcast event "task.created"
+- Returns {success: true, task_id: "..."}
+- Proper error handling with status codes (400, 404, 500, 200)
+
+### Section 4 - Frontend Dashboard (`frontend/pages/dashboard/today.tsx`)
+- Next.js page at /dashboard/today
+- Fetches tasks due today from Supabase
+- Filters out completed tasks
+- Displays in table format
+- Shows: type, application_id, due_at, status
+- "Mark Complete" button for each task
+- Updates task status via supabase.from("tasks").update()
+- Optimistic UI update (removes from list immediately)
+- Loading state handling
+- Error state handling
+
+### Section 5 - Stripe Integration (Written explanation below)
+
+### Additional Files
+- `backend/seed_data.sql` - Sample data for testing (5 tasks due today, 2 leads, 2 applications)
+
+---
+
+## Stripe Answer
+
+To implement a Stripe Checkout flow for an application fee:
+
+1. **Create payment_request row**: When a counselor initiates payment for an application, insert a record in `payment_requests` table with `application_id`, `amount`, `status: 'pending'`, and `created_at`.
+
+2. **Create Checkout Session**: Call `stripe.checkout.sessions.create()` with the amount, success/cancel URLs, and metadata containing `payment_request_id` and `application_id`. Store the returned `session_id` and `checkout_url` in the `payment_requests` row.
+
+3. **Store session data**: Update `payment_requests` with `stripe_session_id`, `stripe_session_url`, and set `status: 'awaiting_payment'`. Redirect user to the checkout URL.
+
+4. **Handle webhooks**: Listen for `checkout.session.completed` webhook. Verify signature using `stripe.webhooks.constructEvent()`. Extract `payment_intent_id` and metadata from the event, then update `payment_requests` with `stripe_payment_intent_id`, `status: 'paid'`, and `paid_at` timestamp.
+
+5. **Update application**: In the webhook handler, after confirming payment, update the related application's `status` to `'payment_received'` and `stage` to the next phase (e.g., `'document_submission'`). Optionally trigger email notifications to the student and counselor, and create a timeline entry documenting the payment completion.
